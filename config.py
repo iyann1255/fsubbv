@@ -3,6 +3,8 @@ import os
 def env(key: str, default: str | None = None) -> str | None:
     v = os.getenv(key)
     return v if v is not None and v != "" else default
+from dotenv import load_dotenv
+load_dotenv()
 
 # MASTER bot token (bot utama yang menerima forward dari BotFather)
 BOT_TOKEN = env("BOT_TOKEN", "")
