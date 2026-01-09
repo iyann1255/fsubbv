@@ -1,7 +1,13 @@
 import asyncio
 import re
 import time
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import (
+    Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    Bot,
+)
+from telegram.error import BadRequest
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
@@ -9,7 +15,8 @@ from telegram.ext import (
 
 from config import (
     BOT_TOKEN, DB_PATH, DEV_IDS, MAX_BOTS_PER_OWNER,
-    TOKEN_KEY, PAYWALL_ON, DEFAULT_MODE, DEFAULT_BYPASS
+    TOKEN_KEY, PAYWALL_ON, DEFAULT_MODE, DEFAULT_BYPASS,
+    DEV_MEDIA_CHANNEL_ID, LOG_MEDIA
 )
 from storage import Storage
 from fsub import gate_message, on_check_callback
@@ -41,6 +48,39 @@ def _ts(ts: int | None) -> str:
     if not ts:
         return "-"
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+async def safe_edit(q, text: str, reply_markup=None):
+    """
+    Safe edit for callback query messages.
+    - Ignore 'Message is not modified'
+    - Fallback to sending a new message if edit fails
+    """
+    try:
+        return await q.edit_message_text(
+            text,
+            reply_markup=reply_markup,
+            disable_web_page_preview=True
+        )
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            return
+        try:
+            return await q.message.reply_text(
+                text,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
+        except Exception:
+            return
+    except Exception:
+        try:
+            return await q.message.reply_text(
+                text,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
+        except Exception:
+            return
 
 def _clone_request_kb(bot_key: str) -> InlineKeyboardMarkup:
     buttons = [
@@ -111,7 +151,9 @@ async def master_features(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Mode delete / warn_only\n"
         "• Bypass admin / custom whitelist\n"
         "• Custom teks per grup\n"
-        "• Anti-spam cooldown\n"
+        "• Anti-spam cooldown\n\n"
+        "Bonus FSUBv2:\n"
+        "• Media archive (foto/video/file) ke Channel DB Dev (jika diaktifkan)"
     )
 
 async def mybots(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -144,9 +186,13 @@ async def dev_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Belum ada data bot.")
     lines = ["Bot list (latest):"]
     for r in rows:
-        lines.append(
-            f"- {r['bot_key']} | owner {r['owner_id']} | {r['status']} | created {_ts(r['created_at'])} | approved {_ts(r.get('approved_at'))}"
-        )
+        bot_line = f"- {r['bot_key']} | owner {r['owner_id']} | {r['status']} | created {_ts(r['created_at'])}"
+        if isinstance(r, dict):
+            # optional fields if exist
+            if r.get("bot_username") or r.get("bot_name"):
+                bot_line += f" | bot {r.get('bot_username') or '-'} ({r.get('bot_name') or '-'})"
+        bot_line += f" | approved {_ts(r.get('approved_at') if isinstance(r, dict) else None)}"
+        lines.append(bot_line)
     await update.message.reply_text("\n".join(lines))
 
 async def master_ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -157,14 +203,16 @@ async def master_ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     data = q.data or ""
 
     if data == "ui_how_forward":
-        return await q.edit_message_text(
+        return await safe_edit(
+            q,
             "Cara forward token (aman):\n\n"
             "1) Buka @BotFather\n"
             "2) Buat bot: /newbot\n"
             "3) Setelah BotFather kasih token, *FORWARD* pesan itu ke sini.\n\n"
             "Pastikan pesan yang kamu forward ada token seperti:\n"
             "123456:ABCDEF...\n\n"
-            "Setelah itu tinggal tunggu ACC dari dev."
+            "Setelah itu tinggal tunggu ACC dari dev.",
+            reply_markup=_master_start_kb()
         )
 
     if data == "ui_owner_panel":
@@ -173,25 +221,30 @@ async def master_ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         used = db.count_bots_for_owner(owner_id)
 
         if not items:
-            return await q.edit_message_text(
+            return await safe_edit(
+                q,
                 "Panel Owner\n\n"
                 f"Slot: {used}/{MAX_BOTS_PER_OWNER}\n"
                 "Status: belum ada bot terdaftar.\n\n"
-                "Buat bot di @BotFather lalu forward token ke sini."
+                "Buat bot di @BotFather lalu forward token ke sini.",
+                reply_markup=_master_start_kb()
             )
 
         lines = []
         for it in items:
             lines.append(f"• {it['bot_key']} — {it['status']}")
-        return await q.edit_message_text(
+        return await safe_edit(
+            q,
             "Panel Owner\n\n"
             f"Slot: {used}/{MAX_BOTS_PER_OWNER}\n\n"
             "Daftar bot kamu:\n" + "\n".join(lines) +
-            "\n\nTip: kalau status ACTIVE, buka bot kamu lalu /start."
+            "\n\nTip: kalau status ACTIVE, buka bot kamu lalu /start.",
+            reply_markup=_master_start_kb()
         )
 
     if data == "ui_features":
-        return await q.edit_message_text(
+        return await safe_edit(
+            q,
             "Fitur FSUB di bot hasil clone:\n\n"
             "• Multi-channel wajib join\n"
             "• Tombol '✅ Saya sudah join' (cek ulang tanpa spam)\n"
@@ -199,10 +252,13 @@ async def master_ui_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "• Bypass: admin / custom whitelist\n"
             "• Pesan FSUB custom per grup\n"
             "• Anti-spam cooldown\n\n"
+            "Bonus:\n"
+            "• Media archive ke Channel DB Dev\n\n"
             "Command di bot hasil clone:\n"
             "/fsub — panel admin\n"
             "/help — panduan\n"
-            "/features — daftar fitur"
+            "/features — daftar fitur",
+            reply_markup=_master_start_kb()
         )
 
 # =========================
@@ -212,14 +268,12 @@ def _is_forwarded_from_botfather(update: Update) -> bool:
     m = update.effective_message
     if not m:
         return False
-    # PTB v21 forward_origin
     try:
         fo = getattr(m, "forward_origin", None)
         if fo and getattr(fo, "sender_user", None):
             return fo.sender_user.id == BOTFATHER_ID
     except Exception:
         pass
-    # fallback
     try:
         f = getattr(m, "forward_from", None)
         if f and getattr(f, "id", None):
@@ -251,12 +305,40 @@ async def on_forward_botfather(update: Update, context: ContextTypes.DEFAULT_TYP
             f"Limit bot kamu sudah mentok ({MAX_BOTS_PER_OWNER}). Hubungi dev kalau mau nambah slot."
         )
 
+    # Resolve bot identity from token (getMe)
+    bot_username = None
+    bot_name = None
+    try:
+        tmp_bot = Bot(token=token)
+        me = await tmp_bot.get_me()
+        bot_username = f"@{me.username}" if me.username else None
+        bot_name = me.first_name
+    except Exception:
+        bot_username = None
+        bot_name = None
+
     status = "pending_payment" if PAYWALL_ON else "pending"
     bot_key = db.upsert_bot_pending(owner_id, token, status=status)
-    db.log("CLONE_REQUEST", f"owner {owner_id} forward token {_mask_token(token)}", actor_id=owner_id, bot_key=bot_key)
+
+    # Optional: store metadata if storage supports it
+    try:
+        db.set_bot_meta(bot_key, bot_username, bot_name)
+    except Exception:
+        pass
+
+    db.log(
+        "CLONE_REQUEST",
+        f"owner {owner_id} forward token {_mask_token(token)} bot {bot_username or '-'} ({bot_name or '-'})",
+        actor_id=owner_id,
+        bot_key=bot_key
+    )
 
     await update.message.reply_text(
-        f"Request clone masuk.\nBotKey: {bot_key}\nStatus: {status}\nTunggu ACC dari dev."
+        "Request clone masuk.\n"
+        f"Bot: {bot_username or '(username tidak kebaca)'} ({bot_name or '-'})\n"
+        f"BotKey: {bot_key}\n"
+        f"Status: {status}\n"
+        "Tunggu ACC dari dev."
     )
 
     if DEV_IDS:
@@ -264,6 +346,7 @@ async def on_forward_botfather(update: Update, context: ContextTypes.DEFAULT_TYP
             "Clone Request\n\n"
             f"BotKey: {bot_key}\n"
             f"Owner: {owner_id}\n"
+            f"Bot: {bot_username or '-'} ({bot_name or '-'})\n"
             f"Token: {_mask_token(token)}\n"
             f"Status: {status}"
         )
@@ -313,6 +396,8 @@ def build_child_app(token: str, bot_key: str) -> Application:
             "• Bypass admin / custom\n"
             "• Custom teks per grup\n"
             "• Anti-spam cooldown\n\n"
+            "Bonus:\n"
+            "• Media archive ke Channel DB Dev (jika diaktifkan)\n\n"
             "Panel: /fsub"
         )
 
@@ -322,7 +407,8 @@ def build_child_app(token: str, bot_key: str) -> Application:
         q = update.callback_query
         await q.answer()
         if (q.data or "") == "child_ui_features":
-            return await q.edit_message_text(
+            return await safe_edit(
+                q,
                 "Fitur FSUB:\n"
                 "• Multi-channel wajib join\n"
                 "• Tombol cek join\n"
@@ -330,10 +416,13 @@ def build_child_app(token: str, bot_key: str) -> Application:
                 "• Bypass admin / custom\n"
                 "• Custom teks per grup\n"
                 "• Anti-spam cooldown\n\n"
+                "Bonus:\n"
+                "• Media archive ke Channel DB Dev\n\n"
                 "Panel: /fsub"
             )
         if (q.data or "") == "child_ui_setup":
-            return await q.edit_message_text(
+            return await safe_edit(
+                q,
                 "Cara setup cepat:\n"
                 "1) Jadikan bot admin di grup (opsional tapi disarankan)\n"
                 "2) /fsub add @channelwajib\n"
@@ -408,7 +497,9 @@ def build_child_app(token: str, bot_key: str) -> Application:
 
         if sub == "list":
             chans = db.list_channels(bot_key, chat_id)
-            return await update.message.reply_text("Channel wajib:\n" + ("\n".join([f"• {c}" for c in chans]) if chans else "-"))
+            return await update.message.reply_text(
+                "Channel wajib:\n" + ("\n".join([f"• {c}" for c in chans]) if chans else "-")
+            )
 
         if sub == "mode" and len(args) >= 2:
             mode = args[1].lower()
@@ -451,24 +542,92 @@ def build_child_app(token: str, bot_key: str) -> Application:
 
         if sub == "bypasslist":
             users = db.list_bypass_users(bot_key, chat_id)
-            return await update.message.reply_text("Bypass users:\n" + ("\n".join([str(u) for u in users]) if users else "-"))
+            return await update.message.reply_text(
+                "Bypass users:\n" + ("\n".join([str(u) for u in users]) if users else "-")
+            )
 
         return await update.message.reply_text("Subcommand nggak dikenal. Ketik /fsub buat panel.")
 
+    # --- FSUB gate for group messages ---
     async def child_on_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await gate_message(update, context, db, bot_key)
 
+    # --- FSUB callbacks ---
     async def child_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.callback_query and (update.callback_query.data or "").startswith("fsub_check:"):
             await on_check_callback(update, context, db, bot_key)
+
+    # --- Media archive: copy media messages to DEV_MEDIA_CHANNEL_ID ---
+    async def archive_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not LOG_MEDIA:
+            return
+        if DEV_MEDIA_CHANNEL_ID == 0:
+            return
+        if not update.message:
+            return
+
+        m = update.message
+
+        # only archive if it contains media/file
+        has_media = any([
+            m.photo, m.video, m.document, m.audio, m.voice, m.animation, m.sticker
+        ])
+        if not has_media:
+            return
+
+        # Copy to channel DB dev (no download)
+        try:
+            copied = await context.bot.copy_message(
+                chat_id=DEV_MEDIA_CHANNEL_ID,
+                from_chat_id=m.chat_id,
+                message_id=m.message_id,
+            )
+        except Exception as e:
+            # Most common: bot is not a member/admin of the channel
+            try:
+                db.log("MEDIA_ARCHIVE_FAIL", str(e), bot_key=bot_key)
+            except Exception:
+                pass
+            return
+
+        # Log minimal metadata
+        try:
+            t = (
+                "photo" if m.photo else
+                "video" if m.video else
+                "document" if m.document else
+                "audio" if m.audio else
+                "voice" if m.voice else
+                "animation" if m.animation else
+                "sticker" if m.sticker else
+                "other"
+            )
+            from_user = m.from_user.id if m.from_user else "-"
+            db.log(
+                "MEDIA_ARCHIVE",
+                f"type={t} from_chat={m.chat_id} from_user={from_user} archived_msg_id={copied.message_id}",
+                bot_key=bot_key
+            )
+        except Exception:
+            pass
 
     app.add_handler(CommandHandler("start", child_start))
     app.add_handler(CommandHandler("help", child_help))
     app.add_handler(CommandHandler("features", child_features))
     app.add_handler(CommandHandler("fsub", child_fsub))
+
     app.add_handler(CallbackQueryHandler(child_ui_callback, pattern="^child_ui_"))
     app.add_handler(CallbackQueryHandler(child_cb))
+
+    # Media archive handler (works in private/group; you can restrict to private if needed)
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.VOICE | filters.ANIMATION | filters.Sticker.ALL),
+        archive_media
+    ))
+
+    # FSUB gate only for group chats
     app.add_handler(MessageHandler(filters.ALL & filters.ChatType.GROUPS, child_on_msg))
+
     return app
 
 async def start_child_bot(bot_key: str):
@@ -500,7 +659,7 @@ async def stop_child_bot(bot_key: str):
     db.log("CHILD_STOPPED", "stopped", bot_key=bot_key)
 
 # =========================
-# DEV CALLBACKS (ACC/REJECT/SUSPEND/RESUME)
+# DEV CALLBACKS
 # =========================
 async def dev_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.callback_query or not update.effective_user:
@@ -518,40 +677,50 @@ async def dev_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     bot = db.get_bot(bot_key)
     if not bot:
-        return await q.edit_message_text("Bot tidak ditemukan di DB.")
+        return await safe_edit(q, "Bot tidak ditemukan di DB.")
+
+    # state guards (anti klik dobel)
+    if action == "dev_acc" and bot.get("status") == "active":
+        return await safe_edit(q, f"{bot_key}: sudah ACTIVE.")
+    if action == "dev_suspend" and bot.get("status") == "suspended":
+        return await safe_edit(q, f"{bot_key}: sudah SUSPENDED.")
+    if action == "dev_resume" and bot.get("status") == "active":
+        return await safe_edit(q, f"{bot_key}: sudah ACTIVE.")
+    if action == "dev_reject" and bot.get("status") == "rejected":
+        return await safe_edit(q, f"{bot_key}: sudah REJECTED.")
 
     if action == "dev_paid":
         db.set_bot_status(bot_key, "pending", actor_id=update.effective_user.id)
-        return await q.edit_message_text(f"{bot_key}: marked paid -> pending. Sekarang bisa ACC.")
+        return await safe_edit(q, f"{bot_key}: marked paid -> pending. Sekarang bisa ACC.")
 
     if action == "dev_acc":
         if PAYWALL_ON and bot["status"] == "pending_payment":
-            return await q.edit_message_text(f"{bot_key}: masih pending_payment. Mark Paid dulu.")
+            return await safe_edit(q, f"{bot_key}: masih pending_payment. Mark Paid dulu.")
         db.approve_bot(bot_key, update.effective_user.id)
         try:
             await start_child_bot(bot_key)
         except Exception as e:
             db.log("CHILD_START_FAIL", str(e), actor_id=update.effective_user.id, bot_key=bot_key)
-            return await q.edit_message_text(f"{bot_key}: approved, tapi start gagal: {e}")
-        return await q.edit_message_text(f"{bot_key}: APPROVED + STARTED.")
+            return await safe_edit(q, f"{bot_key}: approved, tapi start gagal: {e}")
+        return await safe_edit(q, f"{bot_key}: APPROVED + STARTED.")
 
     if action == "dev_reject":
         db.reject_bot(bot_key, update.effective_user.id)
         await stop_child_bot(bot_key)
-        return await q.edit_message_text(f"{bot_key}: REJECTED.")
+        return await safe_edit(q, f"{bot_key}: REJECTED.")
 
     if action == "dev_suspend":
         db.set_bot_status(bot_key, "suspended", actor_id=update.effective_user.id)
         await stop_child_bot(bot_key)
-        return await q.edit_message_text(f"{bot_key}: SUSPENDED + STOPPED.")
+        return await safe_edit(q, f"{bot_key}: SUSPENDED + STOPPED.")
 
     if action == "dev_resume":
         db.set_bot_status(bot_key, "active", actor_id=update.effective_user.id)
         try:
             await start_child_bot(bot_key)
         except Exception as e:
-            return await q.edit_message_text(f"{bot_key}: resume gagal: {e}")
-        return await q.edit_message_text(f"{bot_key}: RESUMED + STARTED.")
+            return await safe_edit(q, f"{bot_key}: resume gagal: {e}")
+        return await safe_edit(q, f"{bot_key}: RESUMED + STARTED.")
 
 # =========================
 # MAIN
