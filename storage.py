@@ -35,7 +35,6 @@ class Storage:
         with self._conn() as c:
             cur = c.cursor()
 
-            # ----- clone bots registry -----
             cur.execute("""
             CREATE TABLE IF NOT EXISTS bots(
                 bot_key TEXT PRIMARY KEY,
@@ -59,7 +58,6 @@ class Storage:
             )
             """)
 
-            # ----- FSUB settings per bot_key -----
             cur.execute("""
             CREATE TABLE IF NOT EXISTS groups_v2(
                 bot_key TEXT NOT NULL,
@@ -90,11 +88,10 @@ class Storage:
             )
             """)
 
-    # ---------------- encryption helpers ----------------
+    # ----- encryption -----
     def _enc(self, token: str) -> str:
         if self._fernet:
             return self._fernet.encrypt(token.encode()).decode()
-        # fallback (not secure) - still better than plain in logs
         return "plain:" + token
 
     def _dec(self, token_enc: str) -> str:
@@ -102,15 +99,13 @@ class Storage:
             return token_enc.split("plain:", 1)[1]
         if self._fernet:
             return self._fernet.decrypt(token_enc.encode()).decode()
-        # if no fernet but not plain, cannot decrypt
         raise ValueError("TOKEN_KEY missing/invalid, cannot decrypt stored token.")
 
     @staticmethod
     def make_bot_key(token: str) -> str:
-        # stable id that doesn't reveal token
         return hashlib.sha256(token.encode()).hexdigest()[:16]
 
-    # ---------------- logs ----------------
+    # ----- logs -----
     def log(self, action: str, detail: str = "", actor_id: int | None = None, bot_key: str | None = None):
         with self._conn() as c:
             c.execute(
@@ -118,7 +113,7 @@ class Storage:
                 (int(time.time()), bot_key, actor_id, action, detail[:800])
             )
 
-    # ---------------- bots registry ----------------
+    # ----- bots registry -----
     def count_bots_for_owner(self, owner_id: int) -> int:
         with self._conn() as c:
             row = c.execute(
@@ -178,6 +173,14 @@ class Storage:
             rows = c.execute("SELECT * FROM bots WHERE status='active'").fetchall()
             return [dict(r) for r in rows]
 
+    def list_recent_bots(self, limit: int = 50) -> list[dict]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT bot_key, owner_id, status, created_at, approved_by, approved_at FROM bots ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def get_token_for_bot(self, bot_key: str) -> str:
         with self._conn() as c:
             row = c.execute("SELECT token_enc FROM bots WHERE bot_key=?", (bot_key,)).fetchone()
@@ -185,7 +188,7 @@ class Storage:
                 raise KeyError("bot not found")
             return self._dec(row["token_enc"])
 
-    # ---------------- FSUB per-bot methods ----------------
+    # ----- FSUB per-bot methods -----
     def ensure_group(self, bot_key: str, chat_id: int):
         with self._conn() as c:
             c.execute(
