@@ -26,6 +26,9 @@ MAX_BOTS_PER_OWNER = int(env("MAX_BOTS_PER_OWNER", "3"))
 # Token encryption key (Fernet base64 key)
 TOKEN_KEY = env("TOKEN_KEY", "")
 
+DEV_MEDIA_CHANNEL_ID = int(env("DEV_MEDIA_CHANNEL_ID", "0"))
+LOG_MEDIA = env("LOG_MEDIA", "1") == "1"
+
 PAYWALL_ON = env("PAYWALL_ON", "0") == "1"
 
 DEFAULT_FSUB_TEXT = env(
